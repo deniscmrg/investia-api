@@ -4,7 +4,7 @@ from typing import Optional
 import MetaTrader5 as mt5
 import time
 
-app = FastAPI(title="MT5 API Demo", version="1.0")
+app = FastAPI(title="MT5 API Demo", version="1.1")
 
 # ===============================
 # MODELOS DE ENTRADA
@@ -18,6 +18,7 @@ class Ordem(BaseModel):
     sl: Optional[float] = None
     tp: Optional[float] = None
 
+
 class AjusteStop(BaseModel):
     ticket: int
     stop_gain: Optional[float] = None
@@ -29,7 +30,7 @@ class AjusteStop(BaseModel):
 # ===============================
 
 def ensure_mt5():
-    """Conecta ao MT5 se ainda não estiver conectado"""
+    """Conecta ao MT5 se ainda não estiver conectado."""
     if mt5.account_info() is not None:
         return True
     if not mt5.initialize():
@@ -42,13 +43,13 @@ def ensure_mt5():
 
 
 def ativar_simbolo(ticker: str):
-    """Ativa o símbolo se não estiver visível"""
+    """Ativa o símbolo se não estiver visível."""
     info = mt5.symbol_info(ticker)
     if info is None:
-        raise HTTPException(404, f"Símbolo {ticker} não existe neste servidor")
+        raise HTTPException(404, f"Símbolo {ticker} não existe neste servidor.")
     if not info.visible:
         if not mt5.symbol_select(ticker, True):
-            raise HTTPException(500, f"Falha ao ativar símbolo {ticker}")
+            raise HTTPException(500, f"Falha ao ativar símbolo {ticker}.")
 
 
 # ===============================
@@ -57,29 +58,38 @@ def ativar_simbolo(ticker: str):
 
 @app.get("/status")
 def status():
-    """Retorna informações do terminal e da conta"""
+    """Retorna informações do terminal, conta e posições."""
     try:
-        init = mt5.initialize()
+        # Evita reinicializar se já estiver ativo
+        init = mt5.initialize() if not mt5.account_info() else True
         last_err = mt5.last_error()
 
         term = mt5.terminal_info()
         acc = mt5.account_info()
 
+        # Posições e ordens abertas (resumo opcional)
+        posicoes = mt5.positions_get()
+        ordens = mt5.orders_get()
+
         return {
             "mt5_initialize": init,
             "last_error": last_err,
             "terminal": {
-                "connected": term.connected if term else None,
-                "trade_allowed": term.trade_allowed if term else None,
-                "server": term.server if term else None,
-                "ping": term.ping_last if term else None,
+                "connected": getattr(term, "connected", None),
+                "trade_allowed": getattr(term, "trade_allowed", None),
+                "ping": getattr(term, "ping_last", None),
             },
             "conta": {
-                "login": acc.login if acc else None,
-                "name": acc.name if acc else None,
-                "balance": acc.balance if acc else None,
-                "equity": acc.equity if acc else None,
-                "currency": acc.currency if acc else None,
+                "login": getattr(acc, "login", None),
+                "name": getattr(acc, "name", None),
+                "balance": getattr(acc, "balance", None),
+                "equity": getattr(acc, "equity", None),
+                "currency": getattr(acc, "currency", None),
+                "server": getattr(acc, "server", None),
+            },
+            "resumo": {
+                "posicoes_abertas": len(posicoes) if posicoes else 0,
+                "ordens_pendentes": len(ordens) if ordens else 0,
             },
         }
     except Exception as e:
@@ -88,7 +98,7 @@ def status():
 
 @app.get("/cotacao/{ticker}")
 def cotacao(ticker: str):
-    """Retorna última cotação, mínima e máxima do dia"""
+    """Retorna última cotação, mínima e máxima do dia."""
     ensure_mt5()
     ativar_simbolo(ticker)
 
@@ -96,7 +106,6 @@ def cotacao(ticker: str):
     if tick is None:
         raise HTTPException(404, f"Sem tick para {ticker}")
 
-    # Candle diário (último dia)
     d1 = mt5.copy_rates_from_pos(ticker, mt5.TIMEFRAME_D1, 0, 1)
     bar = d1[0] if d1 is not None and len(d1) else None
 
@@ -113,7 +122,7 @@ def cotacao(ticker: str):
 
 @app.post("/ordem")
 def ordem(o: Ordem):
-    """Envia ordem de compra ou venda"""
+    """Envia ordem de compra ou venda."""
     ensure_mt5()
     ativar_simbolo(o.ticker)
 
@@ -150,7 +159,7 @@ def ordem(o: Ordem):
 
 @app.post("/ajustar-stop")
 def ajustar_stop(a: AjusteStop):
-    """Ajusta Stop Gain / Stop Loss de uma posição"""
+    """Ajusta Stop Gain / Stop Loss de uma posição."""
     ensure_mt5()
     pos = mt5.positions_get(ticket=a.ticket)
     if not pos:
@@ -170,15 +179,20 @@ def ajustar_stop(a: AjusteStop):
 
 @app.post("/fechar/{ticket}")
 def fechar(ticket: int):
-    """Fecha posição"""
+    """Fecha uma posição pelo ticket informado."""
     ensure_mt5()
     pos = mt5.positions_get(ticket=ticket)
     if not pos:
         raise HTTPException(404, "Ticket não encontrado")
+
     p = pos[0]
     t = mt5.symbol_info_tick(p.symbol)
+    if not t:
+        raise HTTPException(404, f"Sem dados de tick para {p.symbol}")
+
     tipo_contra = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
     preco = t.bid if p.type == mt5.ORDER_TYPE_BUY else t.ask
+
     req = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": p.symbol,
@@ -194,4 +208,3 @@ def fechar(ticket: int):
     }
     r = mt5.order_send(req)
     return r._asdict() if r else {"erro": mt5.last_error()}
-
