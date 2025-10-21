@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 import MetaTrader5 as mt5
 import time
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI(title="MT5 API Demo", version="1.1")
 
@@ -118,6 +119,146 @@ def cotacao(ticker: str):
         "max": bar["high"] if bar is not None else None,
         "time": tick.time,
     }
+
+
+@app.get("/posicoes")
+def listar_posicoes():
+    """Retorna todas as posições abertas com informações de stop gain/stop loss."""
+    ensure_mt5()
+
+    posicoes = mt5.positions_get()
+    if posicoes is None:
+        erro = mt5.last_error()
+        raise HTTPException(500, f"Falha ao obter posições: {erro}")
+
+    retorno = []
+    for p in posicoes:
+        retorno.append(
+            {
+                "ticket": p.ticket,
+                "symbol": p.symbol,
+                "type": p.type,
+                "volume": p.volume,
+                "price_open": p.price_open,
+                "price_current": p.price_current,
+                "sl": p.sl,
+                "tp": p.tp,
+                "profit": p.profit,
+                "swap": p.swap,
+                "commission": p.commission,
+                "time": p.time,
+                "time_msc": p.time_msc,
+                "magic": p.magic,
+                "comment": p.comment,
+                "identifier": p.identifier,
+            }
+        )
+
+    return retorno
+
+
+@app.get("/historico")
+def historico(inicio: Optional[int] = None, fim: Optional[int] = None):
+    """
+    Retorna histórico de operações (deals) no intervalo desejado.
+
+    Parâmetros aceitam epoch segundos; sem parâmetros busca últimos 30 dias.
+    """
+    ensure_mt5()
+
+    agora = datetime.now(timezone.utc)
+    fim_dt = datetime.fromtimestamp(fim, tz=timezone.utc) if fim else agora
+    inicio_dt = (
+        datetime.fromtimestamp(inicio, tz=timezone.utc)
+        if inicio
+        else fim_dt - timedelta(days=30)
+    )
+
+    if inicio_dt >= fim_dt:
+        raise HTTPException(400, "Parâmetros inválidos: inicio deve ser anterior a fim.")
+
+    deals = mt5.history_deals_get(inicio_dt, fim_dt)
+    if deals is None:
+        erro = mt5.last_error()
+        raise HTTPException(500, f"Falha ao obter histórico: {erro}")
+
+    return [d._asdict() for d in deals]
+
+
+@app.get("/historico-ordens")
+def historico_ordens(inicio: Optional[int] = None, fim: Optional[int] = None, symbol: Optional[str] = None):
+    """
+    Retorna histórico de ordens (inclui enviadas, modificadas e canceladas).
+
+    Parâmetros aceitam epoch segundos; sem parâmetros busca últimos 30 dias.
+    """
+    ensure_mt5()
+
+    agora = datetime.now(timezone.utc)
+    fim_dt = datetime.fromtimestamp(fim, tz=timezone.utc) if fim else agora
+    inicio_dt = (
+        datetime.fromtimestamp(inicio, tz=timezone.utc)
+        if inicio
+        else fim_dt - timedelta(days=30)
+    )
+
+    if inicio_dt >= fim_dt:
+        raise HTTPException(400, "Parâmetros inválidos: inicio deve ser anterior a fim.")
+
+    if symbol:
+        ativar_simbolo(symbol)
+        orders = mt5.history_orders_get(inicio_dt, fim_dt, group=symbol)
+    else:
+        orders = mt5.history_orders_get(inicio_dt, fim_dt)
+
+    if orders is None:
+        erro = mt5.last_error()
+        raise HTTPException(500, f"Falha ao obter histórico de ordens: {erro}")
+
+    return [o._asdict() for o in orders]
+
+
+@app.get("/ordens")
+def ordens(symbol: Optional[str] = None):
+    """Retorna ordens pendentes; aceita filtro opcional por símbolo."""
+    ensure_mt5()
+
+    if symbol:
+        ativar_simbolo(symbol)
+        ordens = mt5.orders_get(symbol=symbol)
+    else:
+        ordens = mt5.orders_get()
+
+    if ordens is None:
+        erro = mt5.last_error()
+        raise HTTPException(500, f"Falha ao obter ordens: {erro}")
+
+    return [o._asdict() for o in ordens]
+
+@app.get("/conta")
+def conta():
+    """Retorna informações detalhadas da conta."""
+    ensure_mt5()
+
+    info = mt5.account_info()
+    if info is None:
+        erro = mt5.last_error()
+        raise HTTPException(500, f"Falha ao obter informações da conta: {erro}")
+
+    return info._asdict()
+
+
+@app.get("/simbolo/{ticker}")
+def simbolo(ticker: str):
+    """Retorna metadados do símbolo informado."""
+    ensure_mt5()
+    ativar_simbolo(ticker)
+
+    info = mt5.symbol_info(ticker)
+    if info is None:
+        raise HTTPException(404, f"Símbolo {ticker} não encontrado.")
+
+    return info._asdict()
 
 
 @app.post("/ordem")
