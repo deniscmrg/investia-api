@@ -286,6 +286,47 @@ def _validar_ordem(o: Ordem) -> dict:
     if not ok:
         return {"ok": False, "motivo": motivo}
 
+    # Regra de negócio: bloquear compras quando o mercado estiver fechado
+    if o.tipo == "compra":
+        term = mt5.terminal_info()
+        if term and getattr(term, "trade_allowed", None) is False:
+            return {"ok": False, "motivo": "Mercado/terminal indisponível para trade"}
+
+        # Tenta validar via order_check para detectar mensagens de fechamento/indisponibilidade
+        try:
+            req = _build_order_request(o, symbol, tick)
+            check = mt5.order_check(req)
+            if check and hasattr(check, "comment"):
+                comment = str(getattr(check, "comment", "")).lower()
+                if "market" in comment and "closed" in comment:
+                    return {"ok": False, "motivo": "Mercado fechado. Compras não são permitidas agora."}
+                if "trade" in comment and "disabled" in comment:
+                    return {"ok": False, "motivo": "Trading desabilitado para este símbolo no momento."}
+        except Exception:
+            # Se falhar o check, deixamos a checagem final para o POST /ordem
+            pass
+
+    # regra de negócio: não aceitar compras quando o mercado estiver fechado
+    # usamos uma checagem por order_check e/ou trade_allowed
+    if o.tipo == "compra":
+        term = mt5.terminal_info()
+        if term and getattr(term, "trade_allowed", None) is False:
+            return {"ok": False, "motivo": "Mercado/terminal indisponível para trade"}
+
+        # tenta validar via order_check sem realmente enviar
+        try:
+            req = _build_order_request(o, symbol, tick)
+            check = mt5.order_check(req)
+            if check and hasattr(check, "comment"):
+                comment = str(getattr(check, "comment", "")).lower()
+                if "market" in comment and "closed" in comment:
+                    return {"ok": False, "motivo": "Mercado fechado. Compras não são permitidas agora."}
+                if "trade" in comment and "disabled" in comment:
+                    return {"ok": False, "motivo": "Trading desabilitado para este símbolo no momento."}
+        except Exception:
+            # se falhar o check, segue sem bloquear aqui; a proteção final existe no POST /ordem
+            pass
+
     return {
         "ok": True,
         "motivo": None,
@@ -401,7 +442,7 @@ def listar_posicoes():
 
 
 @app.get("/historico")
-def historico(inicio: Optional[int] = None, fim: Optional[int] = None):
+def historico(inicio: Optional[int] = None, fim: Optional[int] = None, symbol: Optional[str] = None, position_id: Optional[int] = None, entry: Optional[str] = None):
     """
     Retorna histórico de operações (deals) no intervalo desejado.
 
@@ -424,8 +465,26 @@ def historico(inicio: Optional[int] = None, fim: Optional[int] = None):
     if deals is None:
         erro = mt5.last_error()
         raise HTTPException(500, f"Falha ao obter histórico: {erro}")
+    items = [d._asdict() for d in deals]
 
-    return [d._asdict() for d in deals]
+    # Filtros opcionais para otimizar consumo pelo servidor MAIN
+    if symbol:
+        sym_up = symbol.strip().upper()
+        items = [d for d in items if str(d.get("symbol", "")).upper() == sym_up]
+    if position_id is not None:
+        items = [d for d in items if int(d.get("position_id") or d.get("position") or 0) == int(position_id)]
+    if entry:
+        ent = entry.strip().lower()
+        if ent in ("in", "out"):
+            code = 0 if ent == "in" else 1
+            def _is_entry(x):
+                try:
+                    return int(x.get("entry")) == code
+                except Exception:
+                    return True  # se não houver campo, não filtra
+            items = [d for d in items if _is_entry(d)]
+
+    return items
 
 
 @app.get("/historico-ordens")
@@ -540,6 +599,39 @@ def ordem(o: Ordem):
         raise HTTPException(404, f"Símbolo {o.ticker} não encontrado")
 
     req = _build_order_request(o, symbol, tick)
+
+    # Regra: bloquear compras quando o mercado estiver fechado
+    if o.tipo == "compra":
+        term = mt5.terminal_info()
+        if term and getattr(term, "trade_allowed", None) is False:
+            raise HTTPException(400, "Mercado/terminal indisponível para trade")
+        try:
+            chk = mt5.order_check(req)
+            if chk and hasattr(chk, "comment"):
+                c = str(getattr(chk, "comment", "")).lower()
+                if ("market" in c and "closed" in c) or ("trade" in c and "disabled" in c):
+                    raise HTTPException(400, "Mercado fechado. Compras não são permitidas agora.")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(400, "Não foi possível validar a disponibilidade do mercado para compra")
+
+    # regra: bloquear compras quando o mercado estiver fechado
+    if o.tipo == "compra":
+        term = mt5.terminal_info()
+        if term and getattr(term, "trade_allowed", None) is False:
+            raise HTTPException(400, "Mercado/terminal indisponível para trade")
+        try:
+            chk = mt5.order_check(req)
+            if chk and hasattr(chk, "comment"):
+                c = str(getattr(chk, "comment", "")).lower()
+                if ("market" in c and "closed" in c) or ("trade" in c and "disabled" in c):
+                    raise HTTPException(400, "Mercado fechado. Compras não são permitidas agora.")
+        except HTTPException:
+            raise
+        except Exception:
+            # se não conseguimos checar, preferimos evitar envio para compra
+            raise HTTPException(400, "Não foi possível validar a disponibilidade do mercado para compra")
 
     result = mt5.order_send(req)
     if not result:
