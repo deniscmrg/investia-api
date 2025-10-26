@@ -128,7 +128,7 @@ def _validate_stop_price(kind: str, price: float, tick) -> tuple[bool, Optional[
     return True, None
 
 
-def _validate_stops_distance(symbol, order_type: int, price: float, sl: float | None, tp: float | None) -> tuple[bool, Optional[str]]:
+def _validate_stops_distance(symbol, order_type: int, price: float, sl: Optional[float], tp: Optional[float]) -> tuple[bool, Optional[str]]:
     """Valida distância mínima de SL/TP conforme trade_stops_level do símbolo (em points)."""
     stops_level = getattr(symbol, "trade_stops_level", 0) or 0
     point = getattr(symbol, "point", 0.0) or 0.0
